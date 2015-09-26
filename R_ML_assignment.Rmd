@@ -1,0 +1,494 @@
+---
+title: "R_ML_assignment"
+author: "Yair_Meidan"
+date: "Friday, September 26, 2015"
+output: html_document
+---
+
+Using machine learning to predict activity quality from activity monitors  
+=========================================================================
+
+
+# Executive summary    
+In this assignment, the prediction of barbell lifting quality is treated as a classification problem, based on sensor data. Several approaches of decision tree induction are proposed and evaluated. An accuracy of about 99% is estimated on a validation set as well as on the training set using 10-fold cross-validation, by three models: plain C5.0, Random Forest and Boosted Tree. A slightly lower accuracy of about 96% is estimated by a fourth model, namely a C5.0 with principal components instead of the original predictors. For prediction on the testing set, a combined predictor is being used, based on majority vote from the top three predictors.  
+
+
+# Background  
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website [here](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).  
+The dataset and literature review for this project are based on the following publication: Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.  
+
+# Goal
+
+The goal of this project is to predict the manner in which they did the exercise. 
+
+
+# Data 
+
+The training data for this project are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv).  
+The test data are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).  
+The data for this project come from [this source](http://groupware.les.inf.puc-rio.br/har).  
+
+
+## Get data  
+Download the training and testing files only if needed, then read the training file.
+```{r}
+# download training file
+if (!file.exists("pml-training.csv")) {
+  fileUrl<-"http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  download.file(fileUrl,destfile="pml-training.csv") 
+}
+
+# download testing file
+if (!file.exists("pml-testing.csv")) {
+  fileUrl<-"http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  download.file(fileUrl,destfile="pml-testing.csv") 
+}
+
+# read training file
+tr_orig<-read.csv(
+  "pml-training.csv"
+  ,header = TRUE
+  ,sep=","
+  ,na.strings=c("NA","#DIV/0!")
+)
+```
+
+## Load required packages for analysis
+```{r warning=FALSE, message=FALSE}
+library(caret) # for pre-processing, visualization, modeling and prediction
+library(ggplot2) # for visualization
+library(xtable) # for table output generation
+```
+
+## Set a seed for reproducibility
+```{r}
+set.seed(123)
+```
+
+## Partition the training data into training and validation  
+The validation set, ehich consists of about 30% of observations, will be used for model fine-tuning and for error estimation.
+```{r}
+inTrain <- createDataPartition(
+  y=tr_orig$classe
+  ,p=0.7
+  ,list=FALSE
+)
+training <- tr_orig[inTrain,]
+validation <- tr_orig[-inTrain,]
+dim(training)
+dim(validation)
+```
+
+## Pre-processing  
+The training set seems to be very "wide": 159 features are available to predict the outcome, labeled *classe*. Out of them, a large number are irrelevant for prediction, so including them might harm generalizability. Other features have extremely low variability if any, have too many missing values or are too correlated with others. The following steps will remove these redundant predictors in order to reduce the problem's dimension, mitigate risks of over fitting and speed up the computation of models.  
+
+### Remove predictors that might harm generalizability
+```{r}
+training<-subset(
+  training
+  ,select=-c(
+    X # just an index
+    ,user_name # too specific 
+    ,raw_timestamp_part_1 # too specific
+    ,raw_timestamp_part_2 # too specific
+    ,cvtd_timestamp # too specific
+    ,new_window # by-product of analysts
+    ,num_window # by-product of analysts
+  )
+)
+
+dim(training)
+```
+
+### Remove predictors with near zero variance 
+These are predictors that have one unique value (i.e. are zero variance predictors) or both of the following characteristics:  
+1. they have very few unique values relative to the number of samples  
+2. the ratio of the frequency of the most common value to the frequency of the second most common value is large  
+```{r}
+training<-subset(
+  training
+  ,select=-nearZeroVar(training)
+)
+
+dim(training)
+```
+
+### Remove predictors where most values are missing 
+```{r}
+# calculate percentage of missing values per predictor 
+pct_na<-apply(
+  training
+  ,2
+  ,function(col) sum(is.na(col))/length(col)
+)
+
+# remove predictors where most values are missing
+training<-training[,pct_na<0.9]
+
+dim(training)
+```
+
+### Convert all integers to numeric predictors
+```{r}
+for (i in 1:dim(training)[2]){
+  if (is.integer(training[,i])==TRUE){
+    training[,i]<-as.numeric(training[,i])
+  }
+}
+```
+
+### Remove highly correlated predictors
+```{r}
+# Calculate correlation between predictors
+descrCor <- cor(subset(training,select=-classe))
+summary(descrCor[upper.tri(descrCor)])
+# Identify highly correlated predictors
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .75)
+
+# Remove highly correlated predictors
+training <- training[,-highlyCorDescr]
+
+dim(training)
+# Correlation among remaining predictors
+descrCor2 <- cor(subset(training,select=-classe))
+summary(descrCor2[upper.tri(descrCor2)])
+```
+
+### Overview the remaining data
+```{r}
+str(training)
+summary(training)
+```
+  
+We are now left with the outcome variable plus 31 (out of the original 159) predictors, all of which are numeric, less correlated with one another than before, are sufficiently populated with data and potentially have logical predictive power.
+
+## Visual exploration of data  
+In this stage, plots are employed for gaining initial insights. The plots are of course based only on the training set (not the test set and neither the validation set), in order to look for:  
+1. Imbalance in outcomes/predictors  
+2. Outliers  
+3. Groups of points not explained by a predictor  
+4. Skewed variables  
+5. Useful predictors, and regions of them that should be further explored   
+
+### Distribution of classe  
+The outcome variable, *classe*, represents the quality of performing Unilateral Dumbbell Biceps Curl in five different fashions:  
+1. exactly according to the specification (Class A)  
+2. throwing the elbows to the front (Class B)  
+3. lifting the dumbbell only halfway (Class C)  
+4. lowering the dumbbell only halfway (Class D)  
+5. throwing the hips to the front (Class E)  
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. 
+```{r echo=FALSE}
+ggp <- ggplot(training,aes(x=classe))
+ggp + 
+  geom_histogram()+
+  labs(title = "Figure 1: Distribution of classe") + 
+  labs(x="classe", y = "count")
+```  
+
+Despite a small tendency towards class A (correct execution), the outcome variable seems rather balanced: No value is extremely rare or extremely frequent.  
+
+
+### Variable importance  
+This step harnesses the C5.0 decision tree algorithm to estimate variable importance. In addition to ranking variables by their importance, it assists in focusing the matrix of predictors plots in the next step.  
+
+```{r warning=FALSE, message=FALSE}
+# Set the number of folds for cross validation to 2
+# (small K for quicker calculations, may not be enough for model fitting and error estimation)
+fitControl_quick <- trainControl(
+  method = "cv"
+  ,number = 2
+  ,repeats = 1
+)  
+
+# Train a C5.0 tree
+modelFit_c5_quick <- train(
+  classe ~ .
+  ,data=training
+  ,method="C5.0"
+  ,trControl = fitControl_quick
+)
+
+# Estimate variable importance
+importance <- varImp(modelFit_c5_quick, scale=FALSE)
+# Summarize importance
+print(importance)
+```  
+
+```{r echo=FALSE}
+# Plot importance
+plot(importance, main="Figure 2: Variable Importance Plot")
+```
+
+It seems that out of 31 predictors, 6 have a 100.00 importance: *pitch_forearm*,  *yaw_arm* ,*magnet_dumbbell_z*, *magnet_belt_y*, *gyros_belt_z* and *yaw_belt*. The following predictors do not fall far behind, many of which with importance over 95.  
+
+### Matrix of predictors plots  
+
+In order not to produce an over-crowded plot, we will focus on 3 top variables by means of their importance calculated in the previous stage, namely *yaw_belt*, *gyros_belt_z* and *magnet_belt_y*.  
+
+```{r echo=FALSE}
+# Produce a featurePlot for 3 of the most important variables
+featurePlot(
+  x=training[,c("yaw_belt","gyros_belt_z","magnet_belt_y")]
+  ,y = training$classe
+  ,plot="pairs"
+  ,auto.key = list(columns = 3)
+)
+```  
+
+It is interesting to see that *magnet_belt_y* and *gyros_belt_z* distinguish well between classes *D* and *E*, with a spheric-like border. The predictor *yaw_belt* seems to assist in descriminating classes *A* and *B*. Class *C* may need additional predictors to be descriminated.  
+
+### A closer look into the combination of *yaw_belt* and *gyros_belt_z*  
+
+```{r echo=FALSE}
+# Qplot with color
+qplot(
+        x=yaw_belt
+        ,y=gyros_belt_z
+        ,colour=classe
+        ,data=training
+        ,main="Figure 3: Class regions generated by yaw_belt and gyros_belt_z"
+)
+```  
+
+Some regions, such as approximately 20<*yaw_belt*<150, show excellrnt seperation of classes (class *E* in that case). Other regions, such as the upper end of *yaw_belt*, when *gyros_belt_z* is about 0, present mixed classes and may require further predictors for better classification.  
+
+# Model fitting  
+
+Since this is essentially a classification problem, we will compare here several versions and algorithms of decision trees. Among their key advantage one can opint at  their ease of interpretation and their use of interactions between variables. Additionally, prior data transformations may be less important.  
+
+## Cross Validation  
+
+In order to estimate the test set accuracy, a 10-fold cross validation will be employed for all compared models. Setting k=10 is popular in the field of machine learning, as it balances bias and variance of error estimation, within a reasonable load of computaion.  
+
+```{r}
+fitControl_cv_10 <- trainControl(
+  method = "cv"
+  ,number = 10
+  ,repeats = 1
+)
+```
+
+## Models to compare  
+
+1. A "plain" version of the established C5.0 algorithm, as a performance benchmark   
+2. Another C5.0 algorithm, this time with PCA pre-processing (principal components as predictors, instead of the original variables)  
+3. Random Forest: usually one of the two top performing algorithms, although slower, less interpretable and more prone to overfitting   
+4. Boosted tree:  a strong predictor, comprised of (possibly) weak predictors  
+
+
+```{r warning=FALSE, message=FALSE}
+# 1. C5.0
+modelFit_c5 <- train(
+  classe ~ .
+  ,data=training
+  ,method="C5.0"
+  ,trControl = fitControl_cv_10
+)
+
+# 2. C5.0 with PCA
+modelFit_c5_PCA <- train(
+  classe ~ .
+  ,data=training
+  ,preProcess="pca"
+  ,method="C5.0"
+  ,trControl = fitControl_cv_10
+)
+
+# 3. Random Forest
+modelFit_rf <- train(
+  classe ~ .
+  ,data=training
+  ,method="rf"
+  ,prox=TRUE
+  ,trControl = fitControl_cv_10
+)
+
+# 4. Boosting with trees
+modelFit_bst <- train(
+  classe ~ .
+  ,data=training
+  ,method="rf"
+  ,verbose=FALSE
+  ,trControl = fitControl_cv_10
+)
+```  
+
+# Error estimation  
+Accuracy on the training set (resubstitution accuracy) is optimistic. A better estimate comes from an independent set. In this assignment, for out-of-sample error estimation we will use both the  
+1. training set (~70% of observations), by using 10-fold cross validation  
+2. validation set (the remaining ~30%), by applying every model once  
+
+## Cross validation results  
+
+```{r}
+# collect the accuracy of each fold from each model into a single data frame
+training_CV_accuracy<-data.frame(
+    model=c(
+        rep('C5',10)
+        ,rep('C5_PCA',10)
+        ,rep('Random_Forest',10)
+        ,rep('Boosted_Tree',10)
+    )
+    ,accuracy=c(
+        modelFit_c5$resample$Accuracy
+        ,modelFit_c5_PCA$resample$Accuracy
+        ,modelFit_rf$resample$Accuracy
+        ,modelFit_bst$resample$Accuracy
+    )
+)
+
+# Calculate mean accuracy over 10 folds of cross validation
+cv_accuracies<-aggregate(
+    accuracy ~ model
+    ,training_CV_accuracy
+    ,mean
+)
+```  
+
+```{r echo=FALSE}
+ggplot(
+    data=training_CV_accuracy
+    ,aes(
+        x=model
+        ,y=accuracy
+        ,fill=model
+    )
+) + 
+    geom_boxplot() + 
+    stat_summary(
+        fun.y=mean
+        ,colour="darkred"
+        ,geom="point"
+        ,shape=18
+        ,size=3
+        ,show_guide = FALSE
+    ) + 
+    stat_summary(
+        fun.y=mean
+        ,colour="black"
+        ,geom="text"
+        ,show_guide = FALSE
+        ,vjust=-0.7
+        ,aes( 
+            label=round(..y.., digits=2)
+        )
+    ) +
+    labs(title = "Figure 4: Comparison of cross-validation accuracies")   
+```  
+
+It is apparent how all four models perform very well  
+- Three models with estimated accuracy of ~99%: The plain C5.0. the Random Forest and the boosted tree.  
+- The fourth model, i.e. the C5.0 with principal components instead of the original predictors, has an inferior accuracy of ~96%, which is still very high.  
+
+## Compare to accuracy on the validation set  
+```{r warning=FALSE, message=FALSE}
+# Predictions on validation set
+validation_accuracy<-data.frame(
+    model=c('C5','C5_PCA','Random_Forest','Boosted_Tree')    
+    ,validation_accuracy=c(
+        confusionMatrix(validation$classe,predict(modelFit_c5,validation))$overall['Accuracy']
+        ,confusionMatrix(validation$classe,predict(modelFit_c5_PCA,validation))$overall['Accuracy']
+        ,confusionMatrix(validation$classe,predict(modelFit_rf,validation))$overall['Accuracy']
+        ,confusionMatrix(validation$classe,predict(modelFit_bst,validation))$overall['Accuracy']
+    )
+)
+
+# Join evaluations
+accuracies<-join(
+    x=cv_accuracies
+    ,y=validation_accuracy
+    ,by="model"
+)
+```  
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, results="asis"}
+# Rename
+colnames(accuracies)[2]<-"training_cv_accuracy"
+
+# Calculate difference in accuracy
+accuracies$accuracy_dif<-accuracies$training_cv_accuracy-accuracies$validation_accuracy
+
+# Round all numbers to second decimal
+accuracies$training_cv_accuracy<-round(accuracies$training_cv_accuracy,2)
+accuracies$validation_accuracy<-round(accuracies$validation_accuracy,2)
+accuracies$accuracy_dif<-round(accuracies$accuracy_dif,2)
+
+# Output results to formatted table
+print(
+    xtable(accuracies)
+    ,type="html"
+)
+```  
+
+When applying the models on the validation set, the accuracy estimations are almost identical to those obtained on the training set using 10-fold cross validation.  
+
+## Combining predictors  
+
+One last attempt to improve accuracy is to combine predictors, based on majority vote. That is, create a single classifier, that will hopefully be more accurate than any of its components. Typical model for multiclass data as we have here:  
+1. Build an odd number of models, in our case the three stronger classifiers mentioned earlier  
+2. Predict with each model  
+3. Predict the class by majority vote  
+
+
+```{r}
+# Produce predictions by each model
+combined_pred<-data.frame(
+    c5=predict(modelFit_c5,validation)
+    ,rf=predict(modelFit_rf,validation)
+    ,bst=predict(modelFit_bst,validation)
+)
+
+# Majority vote
+combined_pred$majority_vote<-apply(
+    combined_pred
+    ,1
+    ,function(x) names(which.max(table(x)))
+)
+
+# Confusion matrix for the majority vote model
+confusionMatrix(
+    validation$classe
+    ,combined_pred$majority_vote
+)
+```
+
+The accuracy of the combined predictor on the validation set is just about the same as any of its components, only negligibly better. Still, theoretically it should not perform any worse, so we shall use it to perform the prediction on the testing set.  
+
+# Prediction on the testing set  
+
+```{r results="asis"}
+# read testing file
+testing<-read.csv(
+  "pml-testing.csv"
+  ,header = TRUE
+  ,sep=","
+  ,na.strings=c("NA","#DIV/0!")
+)
+
+# Convert all integers in testing set to numeric predictors, as in the training set  
+for (i in 1:dim(testing)[2]){
+        if (is.integer(testing[,i])==TRUE){
+                testing[,i]<-as.numeric(testing[,i])
+        }
+}
+
+# Produce predictions by each model
+combined_pred_tst<-data.frame(
+    c5=predict(modelFit_c5,testing)
+    ,rf=predict(modelFit_rf,testing)
+    ,bst=predict(modelFit_bst,testing)
+)
+
+# Majority vote
+combined_pred_tst$majority_vote<-apply(
+    combined_pred_tst
+    ,1
+    ,function(x) names(which.max(table(x)))
+)
+
+# Show predictions
+combined_pred_tst$majority_vote
+```
+
